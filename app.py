@@ -34,6 +34,14 @@ URGENCY_LABEL = {
     "Unknown": "⚪ No end date on file",
 }
 
+# Org ID for building direct "open this account in Zoho" links in the tables
+# below. Zoho's own record URLs follow this pattern.
+ZOHO_ORG_ID = "20098805637"
+
+
+def zoho_account_url(account_id):
+    return f"https://crm.zoho.eu/crm/org{ZOHO_ORG_ID}/tab/Accounts/{account_id}"
+
 
 @st.cache_data(ttl=270)  # Zoho access tokens last 1hr; refresh well before that
 def get_access_token():
@@ -208,6 +216,8 @@ for account_id, contact in contacts_lookup.items():
     df.loc[mask, "Primary Contact"] = contact["name"]
     df.loc[mask, "Primary Contact Number"] = contact["number"]
 
+df["Open in Zoho"] = df["Account ID"].apply(zoho_account_url)
+
 
 # --- Data Prep: contract end date, time remaining, urgency ---
 def parse_zoho_date(value):
@@ -307,6 +317,7 @@ table_cols = [
     "Primary Contact",
     "Primary Contact Number",
     "No. of Handsets",
+    "Open in Zoho",
 ]
 
 
@@ -338,6 +349,7 @@ else:
         display_df.style.apply(highlight_urgency, axis=1),
         hide_index=True,
         use_container_width=True,
+        column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
     )
 
 # Accounts with no contract end date on file — listed separately as requested,
@@ -349,8 +361,15 @@ if not unknown_df.empty:
     ):
         st.dataframe(
             unknown_df[
-                ["Account Name", "Primary Contact", "Primary Contact Number", "Contract Term (months)"]
+                [
+                    "Account Name",
+                    "Primary Contact",
+                    "Primary Contact Number",
+                    "Contract Term (months)",
+                    "Open in Zoho",
+                ]
             ],
             hide_index=True,
             use_container_width=True,
+            column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
         )
