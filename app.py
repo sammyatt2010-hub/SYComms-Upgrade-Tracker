@@ -313,8 +313,18 @@ selected_urgency = st.sidebar.multiselect(
 name_search = st.sidebar.text_input("Search account name")
 
 st.sidebar.divider()
+if st.sidebar.button("🔄 Refresh data now", use_container_width=True):
+    # Pull fresh data within this same session — a browser refresh (F5) would
+    # start a brand-new session and force the password to be re-entered, so
+    # this button re-runs the app in place instead, staying logged in.
+    load_accounts.clear()
+    get_contacts_lookup.clear()
+    st.rerun()
 st.sidebar.caption(f"Last refreshed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-st.sidebar.caption("Data refreshes from Zoho CRM automatically every 60 seconds.")
+st.sidebar.caption(
+    "Data refreshes from Zoho CRM automatically every 60 seconds, or instantly "
+    "with the button above."
+)
 
 filtered_df = df[df["Urgency"].isin(selected_urgency)]
 if name_search:
