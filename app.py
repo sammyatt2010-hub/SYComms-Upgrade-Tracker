@@ -287,10 +287,21 @@ table_cols = [
     "Urgency",
     "Time Remaining",
     "Contract End Date",
+    "Postal Code",
     "Primary Contact",
     "Primary Contact Number",
     "No. of Handsets",
 ]
+
+
+def format_handsets(value):
+    if pd.isna(value):
+        return "None"
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return "None"
+
 
 if visible_df.empty:
     st.info("No accounts match the current filters.")
@@ -298,6 +309,7 @@ else:
     display_df = visible_df[table_cols].copy()
     display_df["Contract End Date"] = display_df["Contract End Date"].dt.strftime("%d/%m/%Y")
     display_df["Urgency"] = display_df["Urgency"].map(URGENCY_LABEL)
+    display_df["No. of Handsets"] = display_df["No. of Handsets"].apply(format_handsets)
 
     def highlight_urgency(row):
         color = {
