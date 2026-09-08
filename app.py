@@ -47,14 +47,22 @@ st.caption(
 ZOHO_ACCOUNTS_URL = "https://accounts.zoho.eu/oauth/v2/token"
 ZOHO_API_DOMAIN = "https://www.zohoapis.eu"
 ACCOUNT_FIELDS = (
-    "Account_Name,Account_Type,Phone,Post_Code,"
+    "Account_Name,Account_Type,Tag,Phone,Post_Code,"
     "Primary_Contact_Name,Primary_Contact_Number,"
     "Contract_Date_End,Contact_Term,Network_Signed,No_of_Handsets"
 )
 
-# This side of the business doesn't use tags — accounts are identified purely
-# by the "Account Type" picklist on the Account record.
+# Accounts are identified primarily by the "Account Type" picklist, but a
+# couple of tags need checking too — see the exclusion rules in load_accounts().
 ACCOUNT_TYPE = "SYC Customer"
+
+# A "MY PA" tag alone means this isn't a real SYComms customer — but some
+# genuine customers carry MY PA *and* SYC together, so only exclude when
+# MY PA shows up on its own, without the SYC tag alongside it.
+EXCLUDE_UNLESS_ALSO_TAGGED = ("MY PA", "SYC")
+
+# Accounts tagged DEAD ACCOUNT are closed and should never appear here.
+DEAD_ACCOUNT_TAG = "DEAD ACCOUNT"
 
 URGENCY_ORDER = ["Red", "Amber", "OK", "Unknown"]
 URGENCY_LABEL = {
@@ -146,10 +154,20 @@ def load_accounts():
         if (r.get("Account_Type") or "") != ACCOUNT_TYPE:
             continue
 
+        tag_names = [t.get("name", "") for t in (r.get("Tag") or [])]
+
+        if DEAD_ACCOUNT_TAG in tag_names:
+            continue  # closed account — never show it
+
+        exclude_tag, unless_tag = EXCLUDE_UNLESS_ALSO_TAGGED
+        if exclude_tag in tag_names and unless_tag not in tag_names:
+            continue  # MY PA without SYC alongside it — not a real customer
+
         rows.append(
             {
                 "Account ID": r.get("id"),
                 "Account Name": r.get("Account_Name") or "",
+                "All Tags": ", ".join(sorted(tag_names)),
                 "Primary Contact": r.get("Primary_Contact_Name") or "",
                 "Primary Contact Number": r.get("Primary_Contact_Number") or "",
                 "Phone": r.get("Phone") or "",
@@ -298,6 +316,18 @@ df["Urgency"] = df["Days Remaining"].apply(urgency_tier)
 df["Time Remaining"] = df["Days Remaining"].apply(time_remaining_label)
 
 
+def is_rolling_contract(term):
+    """Rolling contracts are marked with a contract term of exactly 12
+    months — a fixed reference value, not a genuine 'expiring soon' date."""
+    try:
+        return int(term) == 12
+    except (TypeError, ValueError):
+        return False
+
+
+df["Rolling Contract"] = df["Contract Term (months)"].apply(is_rolling_contract)
+
+
 # --- Sidebar Filters ---
 st.sidebar.header("🔍 Filters")
 st.sidebar.caption(
@@ -332,21 +362,38 @@ if name_search:
         filtered_df["Account Name"].str.contains(name_search, case=False, na=False)
     ]
 
+# Rolling contract customers get their own list further down, regardless of
+# the Urgency filter above — their contract term is a rolling 12-month
+# marker rather than a genuine countdown, so being caught by the Red filter
+# (or hidden by unticking it) isn't meaningful the way it is for everyone else.
+name_filtered_df = df
+if name_search:
+    name_filtered_df = name_filtered_df[
+        name_filtered_df["Account Name"].str.contains(name_search, case=False, na=False)
+    ]
+rolling_df = name_filtered_df[name_filtered_df["Rolling Contract"]].sort_values("Days Remaining")
+
 st.divider()
 
 # --- Top-Line KPIs ---
-kpi_cols = st.columns(4)
+kpi_cols = st.columns(5)
 kpi_cols[0].metric("SYC Customers Tracked", f"{len(df)}")
-kpi_cols[1].metric("🔴 Red (< 12 months)", f"{len(df[df['Urgency'] == 'Red'])}")
+kpi_cols[1].metric(
+    "🔴 Red (< 12 months)",
+    f"{len(df[(df['Urgency'] == 'Red') & (~df['Rolling Contract'])])}",
+)
 kpi_cols[2].metric("🟠 Amber (12–24 months)", f"{len(df[df['Urgency'] == 'Amber'])}")
 kpi_cols[3].metric("⚪ No End Date", f"{len(df[df['Urgency'] == 'Unknown'])}")
+kpi_cols[4].metric("🔄 Rolling Contracts", f"{len(df[df['Rolling Contract']])}")
 
 st.divider()
 
 # --- Watchlist Table ---
 st.subheader("📋 Renewal Watchlist")
 
-visible_df = filtered_df[filtered_df["Urgency"] != "Unknown"].sort_values("Days Remaining")
+visible_df = filtered_df[
+    (filtered_df["Urgency"] != "Unknown") & (~filtered_df["Rolling Contract"])
+].sort_values("Days Remaining")
 
 table_cols = [
     "Account Name",
@@ -357,6 +404,7 @@ table_cols = [
     "Primary Contact",
     "Primary Contact Number",
     "No. of Handsets",
+    "All Tags",
     "Open in Zoho",
 ]
 
@@ -394,7 +442,11 @@ else:
 
 # Accounts with no contract end date on file — listed separately as requested,
 # rather than mixed in (or silently dropped from) the coloured watchlist above.
-unknown_df = filtered_df[filtered_df["Urgency"] == "Unknown"]
+# Rolling contract accounts are excluded here too since they get their own
+# section below instead.
+unknown_df = filtered_df[
+    (filtered_df["Urgency"] == "Unknown") & (~filtered_df["Rolling Contract"])
+]
 if not unknown_df.empty:
     with st.expander(
         f"⚪ {len(unknown_df)} account(s) with no contract end date on file"
@@ -406,6 +458,7 @@ if not unknown_df.empty:
                     "Primary Contact",
                     "Primary Contact Number",
                     "Contract Term (months)",
+                    "All Tags",
                     "Open in Zoho",
                 ]
             ],
@@ -413,3 +466,42 @@ if not unknown_df.empty:
             use_container_width=True,
             column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
         )
+
+# Rolling contract customers ("Contract Term (months)" == exactly 12) aren't
+# on a genuine fixed end date, so being flagged Red in the main list above
+# would be misleading — they get their own list here instead, still visible,
+# just kept separate from the "actually expiring soon" watchlist.
+st.divider()
+st.subheader("🔄 Rolling Contract Customers")
+st.caption(
+    "Accounts on a rolling 12-month contract term. Shown here rather than "
+    "flagged Red above, since their renewal date isn't a genuine deadline."
+)
+
+rolling_table_cols = [
+    "Account Name",
+    "Time Remaining",
+    "Contract End Date",
+    "Postal Code",
+    "Primary Contact",
+    "Primary Contact Number",
+    "No. of Handsets",
+    "All Tags",
+    "Open in Zoho",
+]
+
+if rolling_df.empty:
+    st.info("No rolling contract accounts match the current filters.")
+else:
+    rolling_display_df = rolling_df[rolling_table_cols].copy()
+    rolling_display_df["Contract End Date"] = rolling_display_df["Contract End Date"].apply(
+        lambda d: d.strftime("%d/%m/%Y") if pd.notna(d) else "No end date on file"
+    )
+    rolling_display_df["No. of Handsets"] = rolling_display_df["No. of Handsets"].apply(format_handsets)
+
+    st.dataframe(
+        rolling_display_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
+    )
