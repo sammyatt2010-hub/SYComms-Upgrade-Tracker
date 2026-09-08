@@ -328,6 +328,36 @@ def is_rolling_contract(term):
 df["Rolling Contract"] = df["Contract Term (months)"].apply(is_rolling_contract)
 
 
+def format_handsets(value):
+    if pd.isna(value):
+        return "None"
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return "None"
+
+
+# New deals — contract signed within the last 30 days — flagged up front so
+# they can be handed to billing for onboarding without digging for them.
+NEW_DEAL_WINDOW_DAYS = 30
+df["Contract Signed Date"] = df["Contract Signed"].apply(parse_zoho_date)
+df["Days Since Signed"] = (today - df["Contract Signed Date"]).dt.days
+df["New Deal"] = df["Days Since Signed"].apply(
+    lambda d: pd.notna(d) and 0 <= d <= NEW_DEAL_WINDOW_DAYS
+)
+
+
+def days_since_label(days):
+    if pd.isna(days):
+        return "Unknown"
+    days = int(days)
+    if days == 0:
+        return "Signed today"
+    if days == 1:
+        return "Signed yesterday"
+    return f"Signed {days} days ago"
+
+
 # --- Sidebar Filters ---
 st.sidebar.header("🔍 Filters")
 st.sidebar.caption(
@@ -373,10 +403,16 @@ if name_search:
     ]
 rolling_df = name_filtered_df[name_filtered_df["Rolling Contract"]].sort_values("Days Remaining")
 
+# New deals also sit outside the Urgency filter — a freshly signed contract
+# is worth surfacing regardless of how far off its renewal is.
+new_deals_df = name_filtered_df[name_filtered_df["New Deal"]].sort_values(
+    "Contract Signed Date", ascending=False
+)
+
 st.divider()
 
 # --- Top-Line KPIs ---
-kpi_cols = st.columns(5)
+kpi_cols = st.columns(6)
 kpi_cols[0].metric("SYC Customers Tracked", f"{len(df)}")
 kpi_cols[1].metric(
     "🔴 Red (< 12 months)",
@@ -385,6 +421,44 @@ kpi_cols[1].metric(
 kpi_cols[2].metric("🟠 Amber (12–24 months)", f"{len(df[df['Urgency'] == 'Amber'])}")
 kpi_cols[3].metric("⚪ No End Date", f"{len(df[df['Urgency'] == 'Unknown'])}")
 kpi_cols[4].metric("🔄 Rolling Contracts", f"{len(df[df['Rolling Contract']])}")
+kpi_cols[5].metric("🆕 New Deals (30d)", f"{len(df[df['New Deal']])}")
+
+st.divider()
+
+# --- New Deals ---
+st.subheader("🆕 New Deals (signed in the last 30 days)")
+st.caption(
+    "Contracts signed within the last 30 days — flag these to billing for onboarding."
+)
+
+new_deals_table_cols = [
+    "Account Name",
+    "Contract Signed Date",
+    "Postal Code",
+    "Primary Contact",
+    "Primary Contact Number",
+    "No. of Handsets",
+    "All Tags",
+    "Open in Zoho",
+]
+
+if new_deals_df.empty:
+    st.info("No contracts signed in the last 30 days.")
+else:
+    new_deals_display_df = new_deals_df[new_deals_table_cols].copy()
+    new_deals_display_df["Contract Signed Date"] = new_deals_df["Days Since Signed"].apply(
+        days_since_label
+    )
+    new_deals_display_df["No. of Handsets"] = new_deals_display_df["No. of Handsets"].apply(
+        format_handsets
+    )
+
+    st.dataframe(
+        new_deals_display_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
+    )
 
 st.divider()
 
@@ -407,15 +481,6 @@ table_cols = [
     "All Tags",
     "Open in Zoho",
 ]
-
-
-def format_handsets(value):
-    if pd.isna(value):
-        return "None"
-    try:
-        return str(int(value))
-    except (TypeError, ValueError):
-        return "None"
 
 
 if visible_df.empty:
