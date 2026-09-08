@@ -421,12 +421,12 @@ kpi_cols[1].metric(
 kpi_cols[2].metric("🟠 Amber (12–24 months)", f"{len(df[df['Urgency'] == 'Amber'])}")
 kpi_cols[3].metric("⚪ No End Date", f"{len(df[df['Urgency'] == 'Unknown'])}")
 kpi_cols[4].metric("🔄 Rolling Contracts", f"{len(df[df['Rolling Contract']])}")
-kpi_cols[5].metric("🆕 New Deals (30d)", f"{len(df[df['New Deal']])}")
+kpi_cols[5].metric("🆕 New Accounts (30d)", f"{len(df[df['New Deal']])}")
 
 st.divider()
 
-# --- New Deals ---
-st.subheader("🆕 New Deals (signed in the last 30 days)")
+# --- New Accounts Added ---
+st.subheader("🆕 New Accounts Added (signed in the last 30 days)")
 st.caption(
     "Contracts signed within the last 30 days — flag these to billing for onboarding."
 )
