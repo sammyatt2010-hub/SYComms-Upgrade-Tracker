@@ -238,6 +238,75 @@ def get_contacts_lookup():
     return contacts_by_account
 
 
+# The "Legal Contracts" related list shown on each Account page in Zoho is a
+# custom module (Zoho's auto-generated internal name for it is CustomModule4)
+# rather than a plain field, so it needs its own small lookup.
+LEGAL_CONTRACTS_MODULE = "CustomModule4"
+
+
+@st.cache_data(ttl=3600)  # field structure changes rarely, if ever
+def get_amount_field_api_name():
+    """Looks up the Amount field's actual Zoho API name by its on-screen
+    label, rather than hardcoding it — this org's internal field names don't
+    always match what's shown on screen (e.g. 'Contract Signed' is really
+    stored as Network_Signed), so this is safer than guessing."""
+    token = get_access_token()
+    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+    try:
+        resp = requests.get(
+            f"{ZOHO_API_DOMAIN}/crm/v2/settings/fields",
+            headers=headers,
+            params={"module": LEGAL_CONTRACTS_MODULE},
+            timeout=20,
+        )
+    except Exception:
+        return None
+
+    if resp.status_code != 200:
+        return None
+
+    for field in resp.json().get("fields", []):
+        if (field.get("field_label") or "").strip().lower() == "amount":
+            return field.get("api_name")
+    return None
+
+
+def get_legal_contract_amounts(account_ids):
+    """Pulls each account's Legal Contracts related list and sums the Amount
+    field. Only ever called for the small handful of accounts in the New
+    Accounts Added list, so one request per account is fine here — this
+    isn't the hundreds-of-accounts case the Contacts lookup had to avoid."""
+    amount_field = get_amount_field_api_name()
+    if not amount_field or not account_ids:
+        return {}
+
+    token = get_access_token()
+    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+    amounts = {}
+    for account_id in account_ids:
+        try:
+            resp = requests.get(
+                f"{ZOHO_API_DOMAIN}/crm/v2/Accounts/{account_id}/{LEGAL_CONTRACTS_MODULE}",
+                headers=headers,
+                params={"fields": amount_field},
+                timeout=20,
+            )
+        except Exception:
+            continue
+
+        if resp.status_code != 200:
+            continue  # 204 = no legal contracts on file for this account
+
+        total = 0
+        for record in resp.json().get("data", []):
+            value = record.get(amount_field)
+            if isinstance(value, (int, float)):
+                total += value
+        amounts[account_id] = total
+
+    return amounts
+
+
 # --- Load & Error Handling ---
 try:
     df = load_accounts()
@@ -434,10 +503,7 @@ st.caption(
 new_deals_table_cols = [
     "Account Name",
     "Contract Signed Date",
-    "Postal Code",
-    "Primary Contact",
-    "Primary Contact Number",
-    "No. of Handsets",
+    "Amount",
     "All Tags",
     "Open in Zoho",
 ]
@@ -445,12 +511,25 @@ new_deals_table_cols = [
 if new_deals_df.empty:
     st.info("No contracts signed in the last 30 days.")
 else:
-    new_deals_display_df = new_deals_df[new_deals_table_cols].copy()
+    try:
+        legal_contract_amounts = get_legal_contract_amounts(
+            tuple(new_deals_df["Account ID"])
+        )
+    except Exception:
+        legal_contract_amounts = {}
+
+    new_deals_display_df = new_deals_df[new_deals_table_cols[:2] + new_deals_table_cols[3:]].copy()
     new_deals_display_df["Contract Signed Date"] = new_deals_df["Days Since Signed"].apply(
         days_since_label
     )
-    new_deals_display_df["No. of Handsets"] = new_deals_display_df["No. of Handsets"].apply(
-        format_handsets
+    new_deals_display_df["Amount"] = new_deals_df["Account ID"].apply(
+        lambda acc_id: legal_contract_amounts.get(acc_id)
+    )
+    new_deals_display_df = new_deals_display_df[new_deals_table_cols]
+
+    total_amount = sum(v for v in new_deals_display_df["Amount"] if pd.notna(v))
+    new_deals_display_df["Amount"] = new_deals_display_df["Amount"].apply(
+        lambda v: f"£{v:,.2f}" if pd.notna(v) else "—"
     )
 
     st.dataframe(
@@ -459,6 +538,7 @@ else:
         use_container_width=True,
         column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
     )
+    st.metric("💰 Total signed this month", f"£{total_amount:,.2f}")
 
 st.divider()
 
