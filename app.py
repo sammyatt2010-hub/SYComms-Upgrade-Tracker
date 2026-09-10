@@ -260,8 +260,14 @@ def get_amount_field_api_name():
             params={"module": LEGAL_CONTRACTS_MODULE},
             timeout=20,
         )
-    except Exception:
+    except Exception as err:
+        st.session_state["_amount_field_debug"] = {"error": str(err)}
         return None
+
+    st.session_state["_amount_field_debug"] = {
+        "status": resp.status_code,
+        "body": resp.text[:800],
+    }
 
     if resp.status_code != 200:
         return None
@@ -460,6 +466,7 @@ if st.sidebar.button("🔄 Refresh data now", use_container_width=True):
     # this button re-runs the app in place instead, staying logged in.
     load_accounts.clear()
     get_contacts_lookup.clear()
+    get_amount_field_api_name.clear()
     st.rerun()
 st.sidebar.caption(f"Last refreshed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 st.sidebar.caption(
@@ -555,6 +562,9 @@ else:
     # Temporary — helps track down why Amount isn't showing. Safe to remove
     # once that's sorted; shows no customer data beyond what's already above.
     with st.expander("🛠️ Debug info (Legal Contracts lookup)"):
+        st.write("Amount field lookup:")
+        st.json(st.session_state.get("_amount_field_debug", {}))
+        st.write("Per-account Legal Contracts lookup:")
         st.json(st.session_state.get("_legal_contracts_debug", {}))
 
 st.divider()
