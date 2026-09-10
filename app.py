@@ -260,14 +260,8 @@ def get_amount_field_api_name():
             params={"module": LEGAL_CONTRACTS_MODULE},
             timeout=20,
         )
-    except Exception as err:
-        st.session_state["_amount_field_debug"] = {"error": str(err)}
+    except Exception:
         return None
-
-    st.session_state["_amount_field_debug"] = {
-        "status": resp.status_code,
-        "body": resp.text[:800],
-    }
 
     if resp.status_code != 200:
         return None
@@ -284,17 +278,13 @@ def get_legal_contract_amounts(account_ids):
     Accounts Added list, so one request per account is fine here — this
     isn't the hundreds-of-accounts case the Contacts lookup had to avoid."""
     amount_field = get_amount_field_api_name()
-    debug_info = {"amount_field": amount_field, "lookups": []}
-
     if not amount_field or not account_ids:
-        st.session_state["_legal_contracts_debug"] = debug_info
         return {}
 
     token = get_access_token()
     headers = {"Authorization": f"Zoho-oauthtoken {token}"}
     amounts = {}
     for account_id in account_ids:
-        entry = {"account_id": account_id}
         try:
             resp = requests.get(
                 f"{ZOHO_API_DOMAIN}/crm/v2/Accounts/{account_id}/{LEGAL_CONTRACTS_MODULE}",
@@ -302,14 +292,8 @@ def get_legal_contract_amounts(account_ids):
                 params={"fields": amount_field},
                 timeout=20,
             )
-            entry["status"] = resp.status_code
-            entry["body"] = resp.text[:800]
-        except Exception as err:
-            entry["error"] = str(err)
-            debug_info["lookups"].append(entry)
+        except Exception:
             continue
-
-        debug_info["lookups"].append(entry)
 
         if resp.status_code != 200:
             continue  # 204 = no legal contracts on file for this account
@@ -321,7 +305,6 @@ def get_legal_contract_amounts(account_ids):
                 total += value
         amounts[account_id] = total
 
-    st.session_state["_legal_contracts_debug"] = debug_info
     return amounts
 
 
@@ -557,15 +540,7 @@ else:
         use_container_width=True,
         column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
     )
-    st.metric("💰 Total signed this month", f"£{total_amount:,.2f}")
-
-    # Temporary — helps track down why Amount isn't showing. Safe to remove
-    # once that's sorted; shows no customer data beyond what's already above.
-    with st.expander("🛠️ Debug info (Legal Contracts lookup)"):
-        st.write("Amount field lookup:")
-        st.json(st.session_state.get("_amount_field_debug", {}))
-        st.write("Per-account Legal Contracts lookup:")
-        st.json(st.session_state.get("_legal_contracts_debug", {}))
+    st.metric("💰 Total service value this month", f"£{total_amount:,.2f}")
 
 st.divider()
 
