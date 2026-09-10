@@ -239,9 +239,10 @@ def get_contacts_lookup():
 
 
 # The "Legal Contracts" related list shown on each Account page in Zoho is a
-# custom module (Zoho's auto-generated internal name for it is CustomModule4)
-# rather than a plain field, so it needs its own small lookup.
-LEGAL_CONTRACTS_MODULE = "CustomModule4"
+# custom module rather than a plain field, so it needs its own small lookup.
+# Its REST API name is "Contracts" — the tab in the CRM's own UI shows it
+# internally as "CustomModule4", which is a different, unrelated identifier.
+LEGAL_CONTRACTS_MODULE = "Contracts"
 
 
 @st.cache_data(ttl=3600)  # field structure changes rarely, if ever
