@@ -1,5 +1,6 @@
 from datetime import datetime
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -99,6 +100,32 @@ SOLD_DEALS_WINDOW_DAYS = 30
 # Single colour for both leaderboard charts — one series each, so one hue is
 # all that's needed (no legend required for a single-series bar chart).
 LEADERBOARD_COLOR = "#2563EB"
+
+
+def render_leaderboard(series, category_label, y_label):
+    """Renders a single-series leaderboard bar chart, sorted highest first.
+
+    Built by hand with Altair rather than st.bar_chart: Streamlit's built-in
+    chart types always call Altair's .interactive() under the hood, which
+    binds mouse-wheel scrolling over the chart to zoom — so scrolling the
+    page while the cursor happens to be over the chart zooms it instead of
+    scrolling. Building the same chart without .interactive() keeps the
+    visuals identical but leaves normal page scrolling alone.
+    """
+    if series.empty:
+        st.info("Nothing to show yet.")
+        return
+    chart_df = series.rename_axis(category_label).reset_index(name=y_label)
+    chart = (
+        alt.Chart(chart_df)
+        .mark_bar(color=LEADERBOARD_COLOR)
+        .encode(
+            x=alt.X(f"{category_label}:N", sort="-y", title=""),
+            y=alt.Y(f"{y_label}:Q", title=y_label),
+            tooltip=[category_label, y_label],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
 
 
 @st.cache_data(ttl=270)  # Zoho access tokens last 1hr; refresh well before that
@@ -654,7 +681,19 @@ else:
         use_container_width=True,
         column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
     )
-    st.metric("💰 Total service value this month", f"£{total_amount:,.2f}")
+    # Show the selected period as a proper month name when it lines up with
+    # one calendar month (the common case), otherwise fall back to showing
+    # the actual date range picked above.
+    if (
+        range_start_ts.year == range_end_ts.year
+        and range_start_ts.month == range_end_ts.month
+    ):
+        period_label = range_start_ts.strftime("%B %Y")
+    else:
+        period_label = (
+            f"{range_start_ts.strftime('%d %b %Y')} – {range_end_ts.strftime('%d %b %Y')}"
+        )
+    st.metric(f"💰 Total service value ({period_label})", f"£{total_amount:,.2f}")
 
     st.caption("🏆 Leaderboard — accounts added per consultant")
     owner_counts = (
@@ -663,7 +702,7 @@ else:
         .value_counts()
         .sort_values(ascending=False)
     )
-    st.bar_chart(owner_counts, color=LEADERBOARD_COLOR, x_label="", y_label="Accounts added")
+    render_leaderboard(owner_counts, "Consultant", "Accounts added")
 
 # Sold deals from the Sales Command Center's pipeline — Closed Won only, no
 # open/upcoming or lost deals — tucked away in a collapsible section so it
@@ -753,9 +792,7 @@ with st.expander("💼 Sold Deals (Closed Won)"):
                 .sum()
                 .sort_values(ascending=False)
             )
-            st.bar_chart(
-                consultant_totals, color=LEADERBOARD_COLOR, x_label="", y_label="Total Lease Value sold (£)"
-            )
+            render_leaderboard(consultant_totals, "Consultant", "Total Lease Value sold (£)")
 
 st.divider()
 
