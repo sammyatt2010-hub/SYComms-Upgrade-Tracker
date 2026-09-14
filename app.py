@@ -91,6 +91,10 @@ DEAL_FIELDS = "Deal_Name,Owner,Account_Name,Potential_Value,Services_Value,Stage
 CLOSED_WON_STAGE = "Closed Won"
 SOLD_DEALS_WINDOW_DAYS = 30
 
+# Single colour for both leaderboard charts — one series each, so one hue is
+# all that's needed (no legend required for a single-series bar chart).
+LEADERBOARD_COLOR = "#2563EB"
+
 
 @st.cache_data(ttl=270)  # Zoho access tokens last 1hr; refresh well before that
 def get_access_token():
@@ -626,6 +630,15 @@ else:
     )
     st.metric("💰 Total service value this month", f"£{total_amount:,.2f}")
 
+    st.caption("🏆 Leaderboard — accounts added per consultant")
+    owner_counts = (
+        new_deals_df["Account Owner"]
+        .replace("", "Unassigned")
+        .value_counts()
+        .sort_values(ascending=False)
+    )
+    st.bar_chart(owner_counts, color=LEADERBOARD_COLOR, x_label="", y_label="Accounts added")
+
 # Sold deals from the Sales Command Center's pipeline — Closed Won only, no
 # open/upcoming or lost deals — tucked away in a collapsible section so it
 # doesn't compete for attention with the accounts above.
@@ -684,6 +697,19 @@ with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} da
             st.metric(
                 "💰 Total sold this period",
                 f"£{recent_deals_df['Total Value'].sum():,.2f}",
+            )
+
+            st.caption("🏆 Leaderboard — value sold per consultant")
+            consultant_totals = (
+                recent_deals_df.assign(
+                    **{"Sales Consultant": recent_deals_df["Sales Consultant"].replace("", "Unassigned")}
+                )
+                .groupby("Sales Consultant")["Total Value"]
+                .sum()
+                .sort_values(ascending=False)
+            )
+            st.bar_chart(
+                consultant_totals, color=LEADERBOARD_COLOR, x_label="", y_label="Value sold (£)"
             )
 
 st.divider()
