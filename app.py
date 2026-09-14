@@ -668,7 +668,7 @@ else:
 # Sold deals from the Sales Command Center's pipeline — Closed Won only, no
 # open/upcoming or lost deals — tucked away in a collapsible section so it
 # doesn't compete for attention with the accounts above.
-with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} days)"):
+with st.expander("💼 Sold Deals (Closed Won)"):
     try:
         sold_deals_df = load_sold_deals()
         sold_deals_error = None
@@ -682,14 +682,36 @@ with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} da
         st.info("No Closed Won deals found.")
     else:
         sold_deals_df["Closing Date"] = sold_deals_df["Closing Date"].apply(parse_zoho_date)
+
+        sold_default_start = (today - pd.Timedelta(days=SOLD_DEALS_WINDOW_DAYS)).date()
+        sold_default_end = today.date()
+        sold_selected_range = st.date_input(
+            "Show deals closed between",
+            value=(sold_default_start, sold_default_end),
+            max_value=sold_default_end,
+            key="sold_deals_date_range",
+        )
+        # Same fallback as the New Accounts Added picker — Streamlit hands
+        # back a single date while a user is still picking the second one.
+        if isinstance(sold_selected_range, tuple) and len(sold_selected_range) == 2:
+            sold_range_start, sold_range_end = sold_selected_range
+        else:
+            sold_range_start, sold_range_end = sold_default_start, sold_default_end
+
+        sold_range_start_ts = pd.Timestamp(sold_range_start)
+        sold_range_end_ts = pd.Timestamp(sold_range_end)
+
+        st.caption(
+            f"Closed Won from {sold_range_start_ts.strftime('%d/%m/%Y')} to "
+            f"{sold_range_end_ts.strftime('%d/%m/%Y')}."
+        )
+
         recent_deals_df = sold_deals_df[
-            (today - sold_deals_df["Closing Date"]).dt.days.between(
-                0, SOLD_DEALS_WINDOW_DAYS
-            )
+            sold_deals_df["Closing Date"].between(sold_range_start_ts, sold_range_end_ts)
         ].sort_values("Closing Date", ascending=False)
 
         if recent_deals_df.empty:
-            st.info(f"No deals closed won in the last {SOLD_DEALS_WINDOW_DAYS} days.")
+            st.info("No deals closed won in the selected date range.")
         else:
             deals_display_df = recent_deals_df[
                 [
