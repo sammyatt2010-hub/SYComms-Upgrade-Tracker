@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import altair as alt
 import pandas as pd
@@ -126,6 +126,59 @@ def render_leaderboard(series, category_label, y_label):
         )
     )
     st.altair_chart(chart, use_container_width=True)
+
+
+def date_range_presets(reference_date):
+    """Returns {button label: (start_date, end_date)} for the quick-pick
+    shortcuts shown above each date-range picker, all as plain datetime.date
+    objects relative to reference_date (normally 'today')."""
+    this_month_start = reference_date.replace(day=1)
+    last_month_end = this_month_start - timedelta(days=1)
+    last_month_start = last_month_end.replace(day=1)
+    this_year_start = reference_date.replace(month=1, day=1)
+    last_year_end = this_year_start - timedelta(days=1)
+    last_year_start = last_year_end.replace(month=1, day=1)
+    return {
+        "This month": (this_month_start, reference_date),
+        "Last month": (last_month_start, last_month_end),
+        "This year": (this_year_start, reference_date),
+        "Last year": (last_year_start, last_year_end),
+    }
+
+
+def render_date_range_picker(label, key, default_window_days, reference_date):
+    """Renders the This month / Last month / This year / Last year shortcut
+    buttons plus the manual date-range picker underneath, both writing into
+    the same widget (via session_state), so either way of picking a period
+    lands in the same place. Returns the chosen (start, end) as a pair of
+    pandas Timestamps.
+
+    Clicking a shortcut button sets st.session_state[key] *before* the
+    st.date_input with that key is created further down in this same run —
+    the supported way to have a button drive another widget's value."""
+    presets = date_range_presets(reference_date)
+    preset_cols = st.columns(len(presets))
+    for col, (preset_label, preset_dates) in zip(preset_cols, presets.items()):
+        if col.button(preset_label, key=f"{key}_preset_{preset_label}", use_container_width=True):
+            st.session_state[key] = preset_dates
+
+    default_start = reference_date - timedelta(days=default_window_days)
+    # Only pass `value=` on the widget's very first run. Once it has a value
+    # in session_state — either from a previous pick or a shortcut button
+    # click just above — passing `value=` alongside it triggers a (harmless
+    # but noisy) Streamlit warning about setting a widget two ways at once.
+    date_input_kwargs = {"max_value": reference_date, "key": key}
+    if key not in st.session_state:
+        date_input_kwargs["value"] = (default_start, reference_date)
+    selected_range = st.date_input(label, **date_input_kwargs)
+    # Streamlit hands back a single date while a user is still picking the
+    # second one in the range picker — fall back to the default range then.
+    if isinstance(selected_range, tuple) and len(selected_range) == 2:
+        range_start, range_end = selected_range
+    else:
+        range_start, range_end = default_start, reference_date
+
+    return pd.Timestamp(range_start), pd.Timestamp(range_end)
 
 
 @st.cache_data(ttl=270)  # Zoho access tokens last 1hr; refresh well before that
@@ -606,23 +659,12 @@ st.divider()
 # --- New Accounts Added ---
 st.subheader("🆕 New Accounts Added")
 
-default_start = (today - pd.Timedelta(days=NEW_DEAL_WINDOW_DAYS)).date()
-default_end = today.date()
-selected_range = st.date_input(
+range_start_ts, range_end_ts = render_date_range_picker(
     "Show accounts signed between",
-    value=(default_start, default_end),
-    max_value=default_end,
+    key="new_deals_date_range",
+    default_window_days=NEW_DEAL_WINDOW_DAYS,
+    reference_date=today.date(),
 )
-# Streamlit hands back a single date while a user is still picking the second
-# one in the range picker — fall back to the default range in that instant
-# rather than erroring.
-if isinstance(selected_range, tuple) and len(selected_range) == 2:
-    range_start, range_end = selected_range
-else:
-    range_start, range_end = default_start, default_end
-
-range_start_ts = pd.Timestamp(range_start)
-range_end_ts = pd.Timestamp(range_end)
 
 st.caption(
     f"Contracts signed from {range_start_ts.strftime('%d/%m/%Y')} to "
@@ -722,23 +764,12 @@ with st.expander("💼 Sold Deals (Closed Won)"):
     else:
         sold_deals_df["Closing Date"] = sold_deals_df["Closing Date"].apply(parse_zoho_date)
 
-        sold_default_start = (today - pd.Timedelta(days=SOLD_DEALS_WINDOW_DAYS)).date()
-        sold_default_end = today.date()
-        sold_selected_range = st.date_input(
+        sold_range_start_ts, sold_range_end_ts = render_date_range_picker(
             "Show deals closed between",
-            value=(sold_default_start, sold_default_end),
-            max_value=sold_default_end,
             key="sold_deals_date_range",
+            default_window_days=SOLD_DEALS_WINDOW_DAYS,
+            reference_date=today.date(),
         )
-        # Same fallback as the New Accounts Added picker — Streamlit hands
-        # back a single date while a user is still picking the second one.
-        if isinstance(sold_selected_range, tuple) and len(sold_selected_range) == 2:
-            sold_range_start, sold_range_end = sold_selected_range
-        else:
-            sold_range_start, sold_range_end = sold_default_start, sold_default_end
-
-        sold_range_start_ts = pd.Timestamp(sold_range_start)
-        sold_range_end_ts = pd.Timestamp(sold_range_end)
 
         st.caption(
             f"Closed Won from {sold_range_start_ts.strftime('%d/%m/%Y')} to "
