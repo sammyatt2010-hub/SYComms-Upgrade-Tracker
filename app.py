@@ -85,9 +85,14 @@ def zoho_deal_url(deal_id):
     return f"https://crm.zoho.eu/crm/org{ZOHO_ORG_ID}/tab/Potentials/{deal_id}"
 
 
-# Deals fields, matching the same fields the SYComms Sales Command Center
-# app uses, so the two dashboards agree on what a deal's value is.
-DEAL_FIELDS = "Deal_Name,Owner,Account_Name,Potential_Value,Services_Value,Stage,Closing_Date"
+# Deals fields. Confirmed live against a real closed-won deal (Passages
+# International: Monthly Lease Spend £10, Total Lease Value £8,000, Monthly
+# Network Spend £15) — these are the fields this org actually populates when
+# closing a deal, unlike Potential_Value/Services_Value which sit empty.
+DEAL_FIELDS = (
+    "Deal_Name,Owner,Account_Name,Monthly_Lease_Spend,Total_Lease_Value,"
+    "Monthly_Network_Spend,Stage,Closing_Date"
+)
 CLOSED_WON_STAGE = "Closed Won"
 SOLD_DEALS_WINDOW_DAYS = 30
 
@@ -378,8 +383,9 @@ def load_sold_deals():
                 "Deal Name": r.get("Deal_Name") or "",
                 "Account Name": account.get("name") or "",
                 "Sales Consultant": owner.get("name") or "",
-                "Lease Value": float(r.get("Potential_Value") or 0),
-                "Services Value": float(r.get("Services_Value") or 0),
+                "Monthly Lease Spend": float(r.get("Monthly_Lease_Spend") or 0),
+                "Total Lease Value": float(r.get("Total_Lease_Value") or 0),
+                "Monthly Network Spend": float(r.get("Monthly_Network_Spend") or 0),
                 "Closing Date": r.get("Closing_Date") or "",
             }
         )
@@ -554,12 +560,6 @@ if name_search:
     ]
 rolling_df = name_filtered_df[name_filtered_df["Rolling Contract"]].sort_values("Days Remaining")
 
-# New deals also sit outside the Urgency filter — a freshly signed contract
-# is worth surfacing regardless of how far off its renewal is.
-new_deals_df = name_filtered_df[name_filtered_df["New Deal"]].sort_values(
-    "Contract Signed Date", ascending=False
-)
-
 st.divider()
 
 # --- Top-Line KPIs ---
@@ -577,10 +577,36 @@ kpi_cols[5].metric("🆕 New Accounts (30d)", f"{len(df[df['New Deal']])}")
 st.divider()
 
 # --- New Accounts Added ---
-st.subheader("🆕 New Accounts Added (signed in the last 30 days)")
-st.caption(
-    "Contracts signed within the last 30 days — flag these to billing for onboarding."
+st.subheader("🆕 New Accounts Added")
+
+default_start = (today - pd.Timedelta(days=NEW_DEAL_WINDOW_DAYS)).date()
+default_end = today.date()
+selected_range = st.date_input(
+    "Show accounts signed between",
+    value=(default_start, default_end),
+    max_value=default_end,
 )
+# Streamlit hands back a single date while a user is still picking the second
+# one in the range picker — fall back to the default range in that instant
+# rather than erroring.
+if isinstance(selected_range, tuple) and len(selected_range) == 2:
+    range_start, range_end = selected_range
+else:
+    range_start, range_end = default_start, default_end
+
+range_start_ts = pd.Timestamp(range_start)
+range_end_ts = pd.Timestamp(range_end)
+
+st.caption(
+    f"Contracts signed from {range_start_ts.strftime('%d/%m/%Y')} to "
+    f"{range_end_ts.strftime('%d/%m/%Y')} — flag these to billing for onboarding."
+)
+
+# New deals also sit outside the Urgency filter — a freshly signed contract
+# is worth surfacing regardless of how far off its renewal is.
+new_deals_df = name_filtered_df[
+    name_filtered_df["Contract Signed Date"].between(range_start_ts, range_end_ts)
+].sort_values("Contract Signed Date", ascending=False)
 
 new_deals_base_cols = [
     "Account Name",
@@ -599,7 +625,7 @@ new_deals_table_cols = [
 ]
 
 if new_deals_df.empty:
-    st.info("No contracts signed in the last 30 days.")
+    st.info("No contracts signed in the selected date range.")
 else:
     try:
         legal_contract_amounts = get_legal_contract_amounts(
@@ -656,9 +682,6 @@ with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} da
         st.info("No Closed Won deals found.")
     else:
         sold_deals_df["Closing Date"] = sold_deals_df["Closing Date"].apply(parse_zoho_date)
-        sold_deals_df["Total Value"] = (
-            sold_deals_df["Lease Value"] + sold_deals_df["Services Value"]
-        )
         recent_deals_df = sold_deals_df[
             (today - sold_deals_df["Closing Date"]).dt.days.between(
                 0, SOLD_DEALS_WINDOW_DAYS
@@ -673,9 +696,9 @@ with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} da
                     "Deal Name",
                     "Account Name",
                     "Sales Consultant",
-                    "Lease Value",
-                    "Services Value",
-                    "Total Value",
+                    "Monthly Lease Spend",
+                    "Total Lease Value",
+                    "Monthly Network Spend",
                     "Closing Date",
                     "Deal ID",
                 ]
@@ -685,7 +708,7 @@ with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} da
             )
             deals_display_df["Open in Zoho"] = deals_display_df["Deal ID"].apply(zoho_deal_url)
             deals_display_df = deals_display_df.drop(columns=["Deal ID"])
-            for col in ["Lease Value", "Services Value", "Total Value"]:
+            for col in ["Monthly Lease Spend", "Total Lease Value", "Monthly Network Spend"]:
                 deals_display_df[col] = deals_display_df[col].apply(lambda v: f"£{v:,.2f}")
 
             st.dataframe(
@@ -696,7 +719,7 @@ with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} da
             )
             st.metric(
                 "💰 Total sold this period",
-                f"£{recent_deals_df['Total Value'].sum():,.2f}",
+                f"£{recent_deals_df['Total Lease Value'].sum():,.2f}",
             )
 
             st.caption("🏆 Leaderboard — value sold per consultant")
@@ -704,12 +727,12 @@ with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} da
                 recent_deals_df.assign(
                     **{"Sales Consultant": recent_deals_df["Sales Consultant"].replace("", "Unassigned")}
                 )
-                .groupby("Sales Consultant")["Total Value"]
+                .groupby("Sales Consultant")["Total Lease Value"]
                 .sum()
                 .sort_values(ascending=False)
             )
             st.bar_chart(
-                consultant_totals, color=LEADERBOARD_COLOR, x_label="", y_label="Value sold (£)"
+                consultant_totals, color=LEADERBOARD_COLOR, x_label="", y_label="Total Lease Value sold (£)"
             )
 
 st.divider()
