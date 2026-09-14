@@ -47,7 +47,7 @@ st.caption(
 ZOHO_ACCOUNTS_URL = "https://accounts.zoho.eu/oauth/v2/token"
 ZOHO_API_DOMAIN = "https://www.zohoapis.eu"
 ACCOUNT_FIELDS = (
-    "Account_Name,Account_Type,Tag,Phone,Post_Code,"
+    "Account_Name,Account_Type,Tag,Phone,Post_Code,Owner,"
     "Primary_Contact_Name,Primary_Contact_Number,"
     "Contract_Date_End,Contact_Term,Network_Signed,No_of_Handsets"
 )
@@ -79,6 +79,17 @@ ZOHO_ORG_ID = "20098805637"
 
 def zoho_account_url(account_id):
     return f"https://crm.zoho.eu/crm/org{ZOHO_ORG_ID}/tab/Accounts/{account_id}"
+
+
+def zoho_deal_url(deal_id):
+    return f"https://crm.zoho.eu/crm/org{ZOHO_ORG_ID}/tab/Potentials/{deal_id}"
+
+
+# Deals fields, matching the same fields the SYComms Sales Command Center
+# app uses, so the two dashboards agree on what a deal's value is.
+DEAL_FIELDS = "Deal_Name,Owner,Account_Name,Potential_Value,Services_Value,Stage,Closing_Date"
+CLOSED_WON_STAGE = "Closed Won"
+SOLD_DEALS_WINDOW_DAYS = 30
 
 
 @st.cache_data(ttl=270)  # Zoho access tokens last 1hr; refresh well before that
@@ -167,6 +178,7 @@ def load_accounts():
             {
                 "Account ID": r.get("id"),
                 "Account Name": r.get("Account_Name") or "",
+                "Account Owner": (r.get("Owner") or {}).get("name") or "",
                 "All Tags": ", ".join(sorted(tag_names)),
                 "Primary Contact": r.get("Primary_Contact_Name") or "",
                 "Primary Contact Number": r.get("Primary_Contact_Number") or "",
@@ -306,6 +318,69 @@ def get_legal_contract_amounts(account_ids):
         amounts[account_id] = total
 
     return amounts
+
+
+@st.cache_data(ttl=60)
+def load_sold_deals():
+    """Pulls Closed Won deals from the Deals module — the sold-deals slice
+    of the SYComms Sales Command Center's pipeline, not the full pipeline
+    (no open/upcoming or lost deals here)."""
+    token = get_access_token()
+    headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+
+    records = []
+    page = 1
+    while True:
+        try:
+            resp = requests.get(
+                f"{ZOHO_API_DOMAIN}/crm/v2/Deals",
+                headers=headers,
+                params={
+                    "fields": DEAL_FIELDS,
+                    "per_page": 200,
+                    "page": page,
+                    "sort_by": "Closing_Date",
+                    "sort_order": "desc",
+                },
+                timeout=20,
+            )
+        except Exception as err:
+            raise RuntimeError(f"Could not reach Zoho CRM API. Details: {err}")
+
+        if resp.status_code == 204:
+            break  # no data at all
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Zoho CRM API returned an error (status {resp.status_code}): {resp.text}"
+            )
+
+        payload = resp.json()
+        records.extend(payload.get("data", []))
+        info = payload.get("info", {})
+        if not info.get("more_records"):
+            break
+        page += 1
+
+    rows = []
+    for r in records:
+        if (r.get("Stage") or "") != CLOSED_WON_STAGE:
+            continue
+
+        owner = r.get("Owner") or {}
+        account = r.get("Account_Name") or {}
+        rows.append(
+            {
+                "Deal ID": r.get("id"),
+                "Deal Name": r.get("Deal_Name") or "",
+                "Account Name": account.get("name") or "",
+                "Sales Consultant": owner.get("name") or "",
+                "Lease Value": float(r.get("Potential_Value") or 0),
+                "Services Value": float(r.get("Services_Value") or 0),
+                "Closing Date": r.get("Closing_Date") or "",
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 # --- Load & Error Handling ---
@@ -450,6 +525,7 @@ if st.sidebar.button("🔄 Refresh data now", use_container_width=True):
     load_accounts.clear()
     get_contacts_lookup.clear()
     get_amount_field_api_name.clear()
+    load_sold_deals.clear()
     st.rerun()
 st.sidebar.caption(f"Last refreshed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
 st.sidebar.caption(
@@ -502,8 +578,16 @@ st.caption(
     "Contracts signed within the last 30 days — flag these to billing for onboarding."
 )
 
+new_deals_base_cols = [
+    "Account Name",
+    "Account Owner",
+    "Contract Signed Date",
+    "All Tags",
+    "Open in Zoho",
+]
 new_deals_table_cols = [
     "Account Name",
+    "Account Owner",
     "Contract Signed Date",
     "Amount",
     "All Tags",
@@ -520,7 +604,7 @@ else:
     except Exception:
         legal_contract_amounts = {}
 
-    new_deals_display_df = new_deals_df[new_deals_table_cols[:2] + new_deals_table_cols[3:]].copy()
+    new_deals_display_df = new_deals_df[new_deals_base_cols].copy()
     new_deals_display_df["Contract Signed Date"] = new_deals_df["Days Since Signed"].apply(
         days_since_label
     )
@@ -541,6 +625,66 @@ else:
         column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
     )
     st.metric("💰 Total service value this month", f"£{total_amount:,.2f}")
+
+# Sold deals from the Sales Command Center's pipeline — Closed Won only, no
+# open/upcoming or lost deals — tucked away in a collapsible section so it
+# doesn't compete for attention with the accounts above.
+with st.expander(f"💼 Sold Deals (Closed Won, last {SOLD_DEALS_WINDOW_DAYS} days)"):
+    try:
+        sold_deals_df = load_sold_deals()
+        sold_deals_error = None
+    except Exception as err:
+        sold_deals_df = pd.DataFrame()
+        sold_deals_error = str(err)
+
+    if sold_deals_error:
+        st.error(f"🚨 Could not load deals from Zoho: {sold_deals_error}")
+    elif sold_deals_df.empty:
+        st.info("No Closed Won deals found.")
+    else:
+        sold_deals_df["Closing Date"] = sold_deals_df["Closing Date"].apply(parse_zoho_date)
+        sold_deals_df["Total Value"] = (
+            sold_deals_df["Lease Value"] + sold_deals_df["Services Value"]
+        )
+        recent_deals_df = sold_deals_df[
+            (today - sold_deals_df["Closing Date"]).dt.days.between(
+                0, SOLD_DEALS_WINDOW_DAYS
+            )
+        ].sort_values("Closing Date", ascending=False)
+
+        if recent_deals_df.empty:
+            st.info(f"No deals closed won in the last {SOLD_DEALS_WINDOW_DAYS} days.")
+        else:
+            deals_display_df = recent_deals_df[
+                [
+                    "Deal Name",
+                    "Account Name",
+                    "Sales Consultant",
+                    "Lease Value",
+                    "Services Value",
+                    "Total Value",
+                    "Closing Date",
+                    "Deal ID",
+                ]
+            ].copy()
+            deals_display_df["Closing Date"] = deals_display_df["Closing Date"].dt.strftime(
+                "%d/%m/%Y"
+            )
+            deals_display_df["Open in Zoho"] = deals_display_df["Deal ID"].apply(zoho_deal_url)
+            deals_display_df = deals_display_df.drop(columns=["Deal ID"])
+            for col in ["Lease Value", "Services Value", "Total Value"]:
+                deals_display_df[col] = deals_display_df[col].apply(lambda v: f"£{v:,.2f}")
+
+            st.dataframe(
+                deals_display_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
+            )
+            st.metric(
+                "💰 Total sold this period",
+                f"£{recent_deals_df['Total Value'].sum():,.2f}",
+            )
 
 st.divider()
 
