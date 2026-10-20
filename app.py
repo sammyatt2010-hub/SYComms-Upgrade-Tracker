@@ -823,6 +823,7 @@ if st.sidebar.button("Refresh data now", type="primary", **FULL_WIDTH):
     # this button re-runs the app in place instead, staying logged in.
     st.cache_data.clear()
     st.rerun()
+pdf_slot = st.sidebar.empty()  # the PDF download button is placed here at the end of the script
 st.sidebar.caption(f"Last refreshed: {datetime.now(UK_TZ).strftime('%d/%m/%Y %H:%M:%S')}")
 st.sidebar.caption(
     "Data refreshes from Zoho CRM automatically every 60 seconds, or instantly "
@@ -834,6 +835,9 @@ if st.sidebar.button("Log out", **FULL_WIDTH):
     st.rerun()
 
 tab_renewals, tab_sales = st.tabs(["Renewals", "Sales Pipeline"])
+
+# Filled in as each card renders; the PDF briefing is built from this.
+report = {}
 
 
 # =====================================================================
@@ -886,6 +890,11 @@ with tab_renewals:
         for col, (label, value, anchor, tone) in zip(kpi_cols, tiles):
             with col:
                 render_html(kpi_tile(label, value, href=anchor, tone=tone))
+        report["ren_tiles"] = tiles
+        report["ren_filters"] = (
+            "Urgency: " + (", ".join(selected_urgency) if selected_urgency else "none selected")
+            + (f"  -  Search: {name_search}" if name_search else "")
+        )
 
     # --- 2. New Accounts Added ---
     with st.container(key="card-ren-new"):
@@ -902,6 +911,7 @@ with tab_renewals:
             reference_date=today.date(),
         )
 
+        report["new_range"] = (range_start_ts, range_end_ts)
         st.caption(
             f"Contracts signed from {range_start_ts.strftime('%d/%m/%Y')} to "
             f"{range_end_ts.strftime('%d/%m/%Y')}."
@@ -943,6 +953,9 @@ with tab_renewals:
             ]
 
             total_amount = sum(v for v in new_deals_display_df["Amount"] if pd.notna(v))
+            report["new_table"] = new_deals_display_df.copy()
+            report["new_total"] = total_amount
+            report["new_amounts_error"] = amounts_error
             new_deals_display_df["Amount"] = new_deals_display_df["Amount"].apply(
                 lambda v: f"£{v:,.2f}" if pd.notna(v) else "—"
             )
@@ -965,6 +978,7 @@ with tab_renewals:
                 period_label = (
                     f"{range_start_ts.strftime('%d %b %Y')} – {range_end_ts.strftime('%d %b %Y')}"
                 )
+            report["new_period"] = period_label
             st.metric(f"Total service value ({period_label})", f"£{total_amount:,.2f}")
 
             st.caption("Leaderboard — accounts added per consultant")
@@ -974,6 +988,7 @@ with tab_renewals:
                 .value_counts()
                 .sort_values(ascending=False)
             )
+            report["new_owner_counts"] = owner_counts
             render_leaderboard(owner_counts, "Consultant", "Accounts added")
 
     # --- 3. Renewal Watchlist ---
@@ -987,6 +1002,8 @@ with tab_renewals:
         visible_df = filtered_df[
             (filtered_df["Urgency"] != "Unknown") & (~filtered_df["Rolling Contract"])
         ].sort_values("Days Remaining")
+        report["ren_visible"] = visible_df
+        report["rolling_df"] = rolling_df
 
         table_cols = [
             "Account Name",
@@ -1138,9 +1155,11 @@ with tab_sales:
         )
 
         time_filtered_df = pipeline_df.copy()
+        timeframe_label = "All time"
         year_options = [current_date.year, current_date.year - 1, current_date.year - 2]
 
         if timeframe_option == "Month-to-Date (MTD)":
+            timeframe_label = current_date.strftime("%B %Y") + " (month to date)"
             time_filtered_df = time_filtered_df[
                 (time_filtered_df["Parsed Date"].dt.year == current_date.year)
                 & (time_filtered_df["Parsed Date"].dt.month == current_date.month)
@@ -1165,6 +1184,7 @@ with tab_sales:
                 "Month", month_str_options, index=default_index, key="sp_month"
             )
             chosen_period = pd.to_datetime(selected_month_str, format="%B %Y")
+            timeframe_label = selected_month_str
             time_filtered_df = time_filtered_df[
                 (time_filtered_df["Parsed Date"].dt.year == chosen_period.year)
                 & (time_filtered_df["Parsed Date"].dt.month == chosen_period.month)
@@ -1173,12 +1193,14 @@ with tab_sales:
             current_quarter = (current_date.month - 1) // 3 + 1
             selected_q = tf_cols[1].selectbox("Quarter", [1, 2, 3, 4], index=current_quarter - 1, key="sp_quarter")
             selected_year = tf_cols[2].selectbox("Year", year_options, key="sp_q_year")
+            timeframe_label = f"Q{selected_q} {selected_year}"
             time_filtered_df = time_filtered_df[
                 (time_filtered_df["Parsed Date"].dt.year == selected_year)
                 & (time_filtered_df["Parsed Date"].dt.quarter == selected_q)
             ]
         elif timeframe_option == "Yearly":
             selected_year = tf_cols[1].selectbox("Year", year_options, key="sp_year")
+            timeframe_label = str(selected_year)
             time_filtered_df = time_filtered_df[time_filtered_df["Parsed Date"].dt.year == selected_year]
 
         # Consultant & stage filters (options come from what's in the chosen timeframe)
@@ -1214,12 +1236,24 @@ with tab_sales:
         with pk[3]:
             render_html(kpi_tile("Won / closed", f"{won_count} won · {lost_count} lost", tone="good"))
 
+        sales_report = {
+            "timeframe": timeframe_label, "rep": selected_rep, "status": selected_status,
+            "total": total_deals_count, "early": early_count, "active": active_count,
+            "won": won_count, "lost": lost_count, "show_fin": show_financials,
+            "upcoming": None, "rep_summary": None, "won_by_rep": pd.Series(dtype=int), "stages": [],
+        }
+        if not deals_error:
+            report["sales"] = sales_report
+
         if show_financials:
             st.caption(
                 "Financials use each deal's Total Lease Value and Monthly Network Spend "
                 "(the fields filled in when a deal is closed)."
             )
             won_mask = stage_in(pipeline_filtered_df["Status"], STAGES_WON) if not pipeline_filtered_df.empty else pd.Series(dtype=bool)
+            sales_report["fin_pipeline"] = float(pipeline_filtered_df["Total Lease Value"].sum())
+            sales_report["fin_won"] = float(pipeline_filtered_df.loc[won_mask, "Total Lease Value"].sum())
+            sales_report["fin_network"] = float(pipeline_filtered_df.loc[won_mask, "Monthly Network Spend"].sum())
             fk = st.columns(3)
             with fk[0]:
                 render_html(kpi_tile("Pipeline lease value", money(pipeline_filtered_df["Total Lease Value"].sum())))
@@ -1269,6 +1303,10 @@ with tab_sales:
             diary_source = diary_source[diary_source["Sales Rep"] == selected_rep]
         if selected_status != "All":
             diary_source = diary_source[diary_source["Status"] == selected_status]
+
+        sales_report["upcoming"] = (
+            diary_source[diary_source["Parsed Date"] >= today].sort_values("Parsed Date").head(10)
+        )
 
         appointments = []
         for _, row in diary_source.iterrows():
@@ -1391,6 +1429,10 @@ with tab_sales:
 
             won_by_rep = rep_summary.set_index("Sales Rep")["Won"]
             won_by_rep = won_by_rep[won_by_rep > 0].sort_values(ascending=False)
+            sales_report["rep_summary"] = rep_summary
+            sales_report["won_by_rep"] = won_by_rep
+            if not won_by_rep.empty:
+                sales_report["top_rep"] = (won_by_rep.index[0], int(won_by_rep.iloc[0]))
             if not won_by_rep.empty:
                 st.caption("Leaderboard — deals won per consultant")
                 render_leaderboard(won_by_rep, "Consultant", "Deals won")
@@ -1416,6 +1458,10 @@ with tab_sales:
                 stage_counts.append(
                     {"Stage / Status": f"{stage} (other)", "Total Count": int((time_filtered_df["Status"] == stage).sum())}
                 )
+            sales_report["stages"] = [
+                {**row, "color": STAGE_DOT_COLORS.get(row["Stage / Status"].replace(" (other)", "").lower(), "#7C83FF")}
+                for row in stage_counts
+            ]
             st.dataframe(pd.DataFrame(stage_counts), **DF_WIDTH, hide_index=True)
         else:
             st.info("No data available for stage breakdown.")
@@ -1482,6 +1528,10 @@ with tab_sales:
                         **DF_WIDTH,
                         column_config={"Open in Zoho": st.column_config.LinkColumn(display_text="Open ↗")},
                     )
+                    report["sold"] = {
+                        "df": recent_deals_df, "range": (sold_range_start_ts, sold_range_end_ts),
+                        "total": float(recent_deals_df["Total Lease Value"].sum()), "syc_only": sold_syc_only,
+                    }
                     st.metric("Total sold this period", money(recent_deals_df["Total Lease Value"].sum()))
 
                     st.caption("Leaderboard — value sold per consultant")
@@ -1495,6 +1545,591 @@ with tab_sales:
                     )
                     render_leaderboard(consultant_totals, "Consultant", "Total Lease Value sold (£)")
 
+
+# =====================================================================
+# PDF BRIEFING — a 2-3 page dark-themed summary of both tabs, built from
+# whatever is currently on screen (filters, date ranges and all).
+# Needs the `reportlab` package; if it isn't installed the rest of the app
+# carries on and the sidebar simply explains what to add.
+# =====================================================================
+try:
+    import io
+
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (
+        BaseDocTemplate, CondPageBreak, Flowable, Frame, PageTemplate,
+        Paragraph, Spacer, Table, TableStyle,
+    )
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    REPORTLAB_OK = True
+except ImportError:  # pragma: no cover - depends on the deployment
+    REPORTLAB_OK = False
+
+_PDF = {
+    "bg": "#0A0E1A", "surface": "#111827", "surface2": "#161F33", "surface3": "#1C2740",
+    "border": "#273049", "text": "#E7EAF3", "muted": "#8C98B0", "faint": "#5E6A82",
+    "accent": "#7C83FF", "cyan": "#38D6F5", "good": "#34D399", "warn": "#FBBF24", "bad": "#F87171",
+}
+_TONE = {"": "accent", "bad": "bad", "warn": "warn", "good": "good", "muted": "faint", "cyan": "cyan"}
+
+
+def _hx(key):
+    return rl_colors.HexColor(_PDF.get(key, key))
+
+
+def _mix(fg, bg, alpha):
+    """Blend colour `fg` over `bg` — how the app's translucent tints look on dark."""
+    f, b = _hx(fg), _hx(bg)
+    return rl_colors.Color(
+        f.red * alpha + b.red * (1 - alpha),
+        f.green * alpha + b.green * (1 - alpha),
+        f.blue * alpha + b.blue * (1 - alpha),
+    )
+
+
+def _clean(v):
+    """Plain text that the PDF's built-in font can print (anything it can't becomes '?')."""
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(v).encode("cp1252", "replace").decode("cp1252")
+
+
+def _t(v):
+    """_clean + escaped for use inside a Paragraph."""
+    return _clean(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _fit(text, font, size, max_w):
+    text = _clean(text)
+    if stringWidth(text, font, size) <= max_w:
+        return text
+    while text and stringWidth(text + "...", font, size) > max_w:
+        text = text[:-1]
+    return text.rstrip() + "..."
+
+
+if REPORTLAB_OK:
+
+    class _Header(Flowable):
+        def __init__(self, width, generated):
+            super().__init__()
+            self.width, self.height, self.generated = width, 22 * mm, generated
+
+        def wrap(self, aw, ah):
+            return self.width, self.height
+
+        def draw(self):
+            c, h = self.canv, self.height
+            c.setFillColor(_hx("accent"))
+            c.roundRect(0, h - 13 * mm, 13 * mm, 13 * mm, 3.2 * mm, fill=1, stroke=0)
+            c.setFillColor(_hx("bg"))
+            c.setFont("Helvetica-Bold", 14)
+            c.drawCentredString(6.5 * mm, h - 8.6 * mm, "SC")
+            x = 17.5 * mm
+            c.setFillColor(_hx("good"))
+            c.circle(x + 1 * mm, h - 2.2 * mm, 0.9 * mm, fill=1, stroke=0)
+            c.setFillColor(_hx("cyan"))
+            c.setFont("Helvetica-Bold", 6.8)
+            c.drawString(x + 3.2 * mm, h - 3.1 * mm, "MANAGEMENT BRIEFING  -  LIVE FROM ZOHO CRM")
+            c.setFillColor(_hx("text"))
+            c.setFont("Helvetica-Bold", 19)
+            first = "SYComms Renewals & Sales "
+            c.drawString(x, h - 11 * mm, first)
+            c.setFillColor(_hx("cyan"))
+            c.drawString(x + stringWidth(first, "Helvetica-Bold", 19), h - 11 * mm, "Command Center")
+            c.setFillColor(_hx("muted"))
+            c.setFont("Helvetica", 8)
+            c.drawString(x, h - 16.2 * mm, self.generated)
+            c.setStrokeColor(_hx("border"))
+            c.setLineWidth(0.6)
+            c.line(0, 0.5 * mm, self.width, 0.5 * mm)
+
+    class _Section(Flowable):
+        def __init__(self, width, num, title, subtitle=""):
+            super().__init__()
+            self.width, self.height = width, 11 * mm
+            self.num, self.title, self.subtitle = num, title, subtitle
+
+        def wrap(self, aw, ah):
+            return self.width, self.height
+
+        def draw(self):
+            c, h = self.canv, self.height
+            c.setFillColor(_mix("accent", "bg", 0.16))
+            c.setStrokeColor(_mix("accent", "bg", 0.35))
+            c.setLineWidth(0.6)
+            c.roundRect(0, 1.5 * mm, 8.5 * mm, 8.5 * mm, 2.2 * mm, fill=1, stroke=1)
+            c.setFillColor(_hx("accent"))
+            c.setFont("Helvetica-Bold", 9)
+            c.drawCentredString(4.25 * mm, 4.2 * mm, str(self.num))
+            c.setFillColor(_hx("text"))
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(11.5 * mm, 6.4 * mm, _clean(self.title))
+            c.setFillColor(_hx("muted"))
+            c.setFont("Helvetica", 7.3)
+            c.drawString(11.5 * mm, 2.3 * mm, _fit(self.subtitle, "Helvetica", 7.3, self.width - 12 * mm))
+
+    class _KpiRow(Flowable):
+        def __init__(self, width, items):
+            super().__init__()
+            self.width, self.height, self.items = width, 17 * mm, items
+
+        def wrap(self, aw, ah):
+            return self.width, self.height
+
+        def draw(self):
+            c, h = self.canv, self.height
+            gap = 3 * mm
+            n = len(self.items)
+            w = (self.width - gap * (n - 1)) / n
+            for i, (label, value, tone) in enumerate(self.items):
+                x = i * (w + gap)
+                c.setFillColor(_hx("surface"))
+                c.setStrokeColor(_hx("border"))
+                c.setLineWidth(0.6)
+                c.roundRect(x, 0, w, h, 2.6 * mm, fill=1, stroke=1)
+                c.setStrokeColor(_hx(_TONE.get(tone, "accent")))
+                c.setLineWidth(1.6)
+                c.line(x + 3 * mm, h - 0.5 * mm, x + w - 3 * mm, h - 0.5 * mm)
+                c.setFillColor(_hx("muted"))
+                lab, lsize = str(label).upper(), 5.9
+                while lsize > 4.6 and stringWidth(lab, "Helvetica-Bold", lsize) > w - 5 * mm:
+                    lsize -= 0.2
+                c.setFont("Helvetica-Bold", lsize)
+                c.drawString(x + 2.5 * mm, h - 5.6 * mm, _fit(lab, "Helvetica-Bold", lsize, w - 5 * mm))
+                value = _clean(value)
+                size = 17
+                while size > 8 and stringWidth(value, "Helvetica-Bold", size) > w - 6 * mm:
+                    size -= 1
+                c.setFillColor(_hx("text"))
+                c.setFont("Helvetica-Bold", size)
+                c.drawString(x + 2.5 * mm, 3.6 * mm, value)
+
+    class _BarList(Flowable):
+        """Horizontal bars: label on the left, value on the right."""
+
+        def __init__(self, width, rows, color="accent", label_w=36 * mm, fmt=None):
+            super().__init__()
+            self.width, self.rows, self.color, self.label_w = width, rows, color, label_w
+            self.fmt = fmt or (lambda v: f"{v:g}")
+            self.rh = 6 * mm
+            self.height = max(len(rows), 1) * self.rh
+
+        def wrap(self, aw, ah):
+            return self.width, self.height
+
+        def draw(self):
+            c = self.canv
+            vmax = max([v for _, v, *_ in self.rows] + [1e-9])
+            val_w = 17 * mm
+            track_x, track_w = self.label_w, self.width - self.label_w - val_w
+            for i, row in enumerate(self.rows):
+                label, value = row[0], row[1]
+                colour = row[2] if len(row) > 2 else self.color
+                y = self.height - (i + 1) * self.rh
+                c.setFillColor(_hx("text"))
+                c.setFont("Helvetica", 7.4)
+                c.drawString(0, y + 2.1 * mm, _fit(label, "Helvetica", 7.4, self.label_w - 2 * mm))
+                c.setFillColor(_hx("surface3"))
+                c.roundRect(track_x, y + 1.7 * mm, track_w, 2.8 * mm, 1.2 * mm, fill=1, stroke=0)
+                bw = track_w * (value / vmax) if vmax > 0 else 0
+                if value > 0:
+                    c.setFillColor(_hx(colour))
+                    c.roundRect(track_x, y + 1.7 * mm, max(bw, 2 * mm), 2.8 * mm, 1.2 * mm, fill=1, stroke=0)
+                c.setFillColor(_hx("text"))
+                c.setFont("Helvetica-Bold", 7.4)
+                c.drawRightString(self.width, y + 2.1 * mm, self.fmt(value))
+
+    class _ColumnChart(Flowable):
+        def __init__(self, width, cols, height=36 * mm):
+            super().__init__()
+            self.width, self.height, self.cols = width, height, cols  # cols: (label, value, colour, sublabel)
+
+        def wrap(self, aw, ah):
+            return self.width, self.height
+
+        def draw(self):
+            c = self.canv
+            n = len(self.cols)
+            pitch = self.width / n
+            base, top = 8 * mm, self.height - 5 * mm
+            vmax = max([v for _, v, _, _ in self.cols] + [1])
+            c.setStrokeColor(_hx("border"))
+            c.setLineWidth(0.6)
+            c.line(0, base, self.width, base)
+            for i, (label, value, colour, sub) in enumerate(self.cols):
+                x = i * pitch
+                bh = (top - base) * (value / vmax)
+                if value > 0:
+                    c.setFillColor(_hx(colour))
+                    c.roundRect(x + pitch * 0.18, base, pitch * 0.64, max(bh, 1.2 * mm), 0.9 * mm, fill=1, stroke=0)
+                    c.setFillColor(_hx("text"))
+                    c.setFont("Helvetica-Bold", 6.6)
+                    c.drawCentredString(x + pitch / 2, base + max(bh, 1.2 * mm) + 1 * mm, str(int(value)))
+                c.setFillColor(_hx("muted"))
+                c.setFont("Helvetica", 5.6)
+                c.drawCentredString(x + pitch / 2, base - 3.2 * mm, label)
+                if sub:
+                    c.setFillColor(_hx("faint"))
+                    c.setFont("Helvetica", 5.2)
+                    c.drawCentredString(x + pitch / 2, base - 6 * mm, sub)
+
+    def _styles():
+        mk = ParagraphStyle
+        return {
+            "th": mk("th", fontName="Helvetica-Bold", fontSize=6.2, leading=7.6, textColor=_hx("muted")),
+            "thr": mk("thr", fontName="Helvetica-Bold", fontSize=6.2, leading=7.6, textColor=_hx("muted"), alignment=2),
+            "td": mk("td", fontName="Helvetica", fontSize=7.3, leading=9, textColor=_hx("text")),
+            "tdr": mk("tdr", fontName="Helvetica", fontSize=7.3, leading=9, textColor=_hx("text"), alignment=2),
+            "note": mk("note", fontName="Helvetica", fontSize=6.8, leading=8.5, textColor=_hx("muted")),
+            "hl": mk("hl", fontName="Helvetica", fontSize=8, leading=11.6, textColor=_hx("text")),
+            "lbl": mk("lbl", fontName="Helvetica-Bold", fontSize=6.6, leading=8, textColor=_hx("muted")),
+        }
+
+    def _cell(value, right, st):
+        if isinstance(value, dict):  # {"t": text, "color": key, "bold": True}
+            text = _t(value.get("t"))
+            if value.get("bold"):
+                text = f"<b>{text}</b>"
+            if value.get("color"):
+                text = f'<font color="{_PDF.get(value["color"], value["color"])}">{text}</font>'
+            return Paragraph(text, st["tdr"] if right else st["td"])
+        return Paragraph(_t(value), st["tdr"] if right else st["td"])
+
+    def _table(st, header, rows, widths, right=(), row_tints=None):
+        data = [[Paragraph(_t(h).upper(), st["thr"] if i in right else st["th"]) for i, h in enumerate(header)]]
+        for r in rows:
+            data.append([_cell(v, i in right, st) for i, v in enumerate(r)])
+        style = [
+            ("BACKGROUND", (0, 0), (-1, 0), _hx("surface3")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [_hx("surface"), _hx("surface2")]),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.4, _hx("border")),
+            ("BOX", (0, 0), (-1, -1), 0.6, _hx("border")),
+            ("ROUNDEDCORNERS", [3, 3, 3, 3]),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 5),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ]
+        for i, tint in (row_tints or {}).items():
+            style.append(("BACKGROUND", (0, i + 1), (-1, i + 1), tint))
+        t = Table(data, colWidths=widths, repeatRows=1)
+        t.setStyle(TableStyle(style))
+        return t
+
+    def _callout(st, width, lines):
+        body = "<br/>".join(f'<font color="{_PDF["accent"]}">&#8226;</font>&nbsp; {ln}' for ln in lines)
+        t = Table([[Paragraph(body, st["hl"])]], colWidths=[width])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), _hx("surface2")),
+            ("BOX", (0, 0), (-1, -1), 0.6, _hx("border")),
+            ("LINEBEFORE", (0, 0), (0, -1), 2.4, _hx("accent")),
+            ("ROUNDEDCORNERS", [3, 3, 3, 3]),
+            ("LEFTPADDING", (0, 0), (-1, -1), 9),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        return t
+
+    def _bold(v):
+        return f'<b><font color="{_PDF["text"]}">{_t(v)}</font></b>'
+
+    def _pair(left, right, width):
+        gap = 6 * mm
+        half = (width - gap) / 2
+        t = Table([[left, "", right]], colWidths=[half, gap, half])
+        t.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        return t, half
+
+    def _fmt_date(v):
+        return v.strftime("%d/%m/%Y") if pd.notna(v) else "-"
+
+    def build_pdf_report(R):
+        """Builds the PDF from the `R` dict the app fills in as it renders, returns bytes."""
+        st = _styles()
+        W = A4[0] - 28 * mm
+        gbp = lambda v: f"£{v:,.0f}" if abs(v) >= 1000 else f"£{v:,.2f}"
+        story = [_Header(W, f"Generated {R['generated']}  -  follows the filters and date ranges selected in the app"), Spacer(1, 4 * mm)]
+
+        # ---------------- 1. Renewals ----------------
+        df, today_ts = R["df"], R["today"]
+        story.append(_Section(W, 1, "Renewals", f"{len(df)} SYC Customer accounts tracked  -  {R['ren_filters']}"))
+        story.append(Spacer(1, 1.5 * mm))
+        story.append(_KpiRow(W, [(l, v, tone) for l, v, _a, tone in R["ren_tiles"]]))
+        story.append(Spacer(1, 3.5 * mm))
+
+        live = df[~df["Rolling Contract"]]
+        reds = live[live["Urgency"] == "Red"].sort_values("Days Remaining")
+        overdue = int((live["Days Remaining"] < 0).sum())
+        points = []
+        if len(reds):
+            first = reds.iloc[0]
+            points.append(
+                f"{_bold(len(reds))} account(s) are Red (under 12 months left). Soonest: {_bold(first['Account Name'])} "
+                f"- {_t(first['Time Remaining'])} (ends {_fmt_date(first['Contract End Date'])})."
+            )
+        else:
+            points.append(f"{_bold(0)} accounts are Red - nothing is due to expire within 12 months.")
+        if overdue:
+            points.append(f"{_bold(overdue)} of those are already past their contract end date - chase these first.")
+        points.append(
+            f"{_bold(int((df['Urgency'] == 'Amber').sum()))} account(s) are Amber (12-24 months left) and "
+            f"{_bold(int(df['Rolling Contract'].sum()))} are on rolling 12-month terms."
+        )
+        no_end = int((df["Urgency"] == "Unknown").sum())
+        if no_end:
+            points.append(f"{_bold(no_end)} account(s) have no contract end date on file - worth tidying in Zoho.")
+        points.append(f"{_bold(int(df['New Deal'].sum()))} new account(s) signed in the last 30 days.")
+        story.append(_callout(st, W, points))
+        story.append(Spacer(1, 4 * mm))
+
+        # contracts ending per month
+        story.append(Paragraph("CONTRACTS ENDING PER MONTH  -  next 24 months (rolling contracts excluded)", st["lbl"]))
+        story.append(Spacer(1, 1.5 * mm))
+        dated = live[live["Days Remaining"].notna()]
+        cols = [("Overdue", int((dated["Days Remaining"] < 0).sum()), "bad", "")]
+        period0 = today_ts.to_period("M")
+        for i in range(24):
+            p = period0 + i
+            in_month = dated["Contract End Date"].dt.to_period("M") == p
+            n = int((in_month & (dated["Days Remaining"] >= 0)).sum()) if i == 0 else int(in_month.sum())
+            sub = p.strftime("%Y") if (i == 0 or p.month == 1) else ""
+            cols.append((p.strftime("%b"), n, "bad" if i < 12 else "warn", sub))
+        story.append(_ColumnChart(W, cols))
+        story.append(Paragraph(
+            f'<font color="{_PDF["bad"]}">&#9632;</font> under 12 months (Red) &nbsp;&nbsp; '
+            f'<font color="{_PDF["warn"]}">&#9632;</font> 12-24 months (Amber)', st["note"]))
+        story.append(Spacer(1, 4 * mm))
+
+        # watchlist
+        vis = R["ren_visible"]
+        story.append(Paragraph(f"RENEWAL WATCHLIST  -  soonest first ({len(vis)} account(s) match your filters)", st["lbl"]))
+        story.append(Spacer(1, 1.5 * mm))
+        if vis.empty:
+            story.append(Paragraph("No accounts match the current filters.", st["note"]))
+        else:
+            shown = vis.head(12)
+            rows, tints = [], {}
+            for i, (_, r) in enumerate(shown.iterrows()):
+                colour = {"Red": "bad", "Amber": "warn"}.get(r["Urgency"], "text")
+                rows.append([
+                    {"t": r["Account Name"], "bold": True}, {"t": r["Urgency"], "color": colour, "bold": True},
+                    r["Time Remaining"], _fmt_date(r["Contract End Date"]), r["Primary Contact"], r["Primary Contact Number"],
+                    format_handsets(r["No. of Handsets"]),
+                ])
+                if r["Urgency"] in ("Red", "Amber"):
+                    tints[i] = _mix(colour, "surface" if i % 2 == 0 else "surface2", 0.12)
+            story.append(_table(st, ["Account", "Urgency", "Time left", "Ends", "Contact", "Phone", "Handsets"], rows,
+                                [46 * mm, 15 * mm, 24 * mm, 20 * mm, 30 * mm, 31 * mm, 16 * mm], right=(6,), row_tints=tints))
+            if len(vis) > len(shown):
+                story.append(Spacer(1, 1 * mm))
+                story.append(Paragraph(f"Showing the soonest {len(shown)} of {len(vis)} - the full list is in the app.", st["note"]))
+        story.append(Spacer(1, 5 * mm))
+
+        # ---------------- 2. New accounts ----------------
+        story.append(CondPageBreak(75 * mm))
+        ns, ne = R["new_range"]
+        story.append(_Section(W, 2, "New Accounts Added", f"Contracts signed {ns.strftime('%d/%m/%Y')} to {ne.strftime('%d/%m/%Y')} - for billing onboarding"))
+        story.append(Spacer(1, 1.5 * mm))
+        nt = R.get("new_table")
+        if nt is None or len(nt) == 0:
+            story.append(Paragraph("No contracts were signed in the selected date range.", st["note"]))
+        else:
+            if R.get("new_amounts_error"):
+                story.append(Paragraph(
+                    f'<font color="{_PDF["warn"]}">Amounts could not be read from the Zoho Legal Contracts for this report, so they show as "-".</font>', st["note"]))
+                story.append(Spacer(1, 1 * mm))
+            story.append(_callout(st, W, [
+                f"{_bold(len(nt))} new account(s) signed in {_t(R.get('new_period', 'the period'))}, "
+                f"total service value {_bold('£{:,.2f}'.format(R.get('new_total', 0)))}."
+            ]))
+            story.append(Spacer(1, 2.5 * mm))
+            shown = nt.head(10)
+            rows = [[{"t": r["Account Name"], "bold": True}, r["Account Owner"], r["Contract Signed Date"],
+                     ("£{:,.2f}".format(r["Amount"]) if pd.notna(r["Amount"]) else "-")] for _, r in shown.iterrows()]
+            story.append(_table(st, ["Account", "Owner", "Signed", "Amount"], rows,
+                                [70 * mm, 46 * mm, 36 * mm, 30 * mm], right=(3,)))
+            if len(nt) > len(shown):
+                story.append(Spacer(1, 1 * mm))
+                story.append(Paragraph(f"Showing the latest {len(shown)} of {len(nt)} - the full list is in the app.", st["note"]))
+            oc = R.get("new_owner_counts")
+            if oc is not None and len(oc):
+                story.append(Spacer(1, 3 * mm))
+                story.append(Paragraph("ACCOUNTS ADDED PER CONSULTANT", st["lbl"]))
+                story.append(Spacer(1, 1 * mm))
+                story.append(_BarList(W, [(k, int(v)) for k, v in oc.head(8).items()], color="accent", fmt=lambda v: f"{int(v)}"))
+        story.append(Spacer(1, 4 * mm))
+
+        # rolling
+        rd = R["rolling_df"]
+        story.append(Paragraph(f"ROLLING 12-MONTH CONTRACTS  -  {len(rd)} account(s)", st["lbl"]))
+        story.append(Spacer(1, 1.5 * mm))
+        if rd.empty:
+            story.append(Paragraph("No rolling contract accounts.", st["note"]))
+        else:
+            shown = rd.head(6)
+            rows = [[{"t": r["Account Name"], "bold": True}, r["Time Remaining"], _fmt_date(r["Contract End Date"]),
+                     r["Primary Contact"], r["Primary Contact Number"]] for _, r in shown.iterrows()]
+            story.append(_table(st, ["Account", "Time left", "Ends", "Contact", "Phone"], rows,
+                                [60 * mm, 28 * mm, 24 * mm, 36 * mm, 34 * mm]))
+            if len(rd) > len(shown):
+                story.append(Spacer(1, 1 * mm))
+                story.append(Paragraph(f"Showing {len(shown)} of {len(rd)} - the full list is in the app.", st["note"]))
+        story.append(Spacer(1, 6 * mm))
+
+        # ---------------- 3. Sales pipeline ----------------
+        story.append(CondPageBreak(110 * mm))
+        S = R.get("sales")
+        if S is None:
+            story.append(_Section(W, 3, "Sales Pipeline", "Deals feed unavailable"))
+            story.append(Paragraph("The deals could not be loaded from Zoho when this report was made.", st["note"]))
+        else:
+            story.append(_Section(W, 3, "Sales Pipeline",
+                                  f"{S['timeframe']}  -  Consultant: {S['rep']}  -  Stage: {S['status']}"))
+            story.append(Spacer(1, 1.5 * mm))
+            k = [("Deals in view", S["total"], ""), ("New / booked appts", S["early"], "warn"),
+                 ("In progress / closing", S["active"], "cyan"), ("Won / closed", f"{S['won']} won - {S['lost']} lost", "good")]
+            story.append(_KpiRow(W, k))
+            if S["show_fin"]:
+                story.append(Spacer(1, 3 * mm))
+                story.append(_KpiRow(W, [("Pipeline lease value", gbp(S["fin_pipeline"]), ""),
+                                         ("Won lease value", gbp(S["fin_won"]), "good"),
+                                         ("Won monthly network spend", gbp(S["fin_network"]), "good")]))
+            story.append(Spacer(1, 3.5 * mm))
+
+            pts = []
+            if S["total"]:
+                pts.append(f"{_bold(S['total'])} deal(s) in {_t(S['timeframe'])}: {_bold(S['won'])} won, {_bold(S['lost'])} lost, "
+                           f"{_bold(S['active'])} in progress and {_bold(S['early'])} at the booked-appointment stage.")
+            else:
+                pts.append(f"No deals match {_t(S['timeframe'])} with the current filters.")
+            top = S.get("top_rep")
+            if top:
+                pts.append(f"Top consultant by deals won: {_bold(top[0])} with {_bold(top[1])}.")
+            up = S.get("upcoming")
+            if up is not None and len(up):
+                nxt = up.iloc[0]
+                pts.append(f"Next appointment: {_bold(nxt['Client Name'])} with {_t(nxt['Sales Rep'] or 'Unassigned')} "
+                           f"on {nxt['Parsed Date'].strftime('%a %d %b at %H:%M')}.")
+            sd = R.get("sold")
+            if sd and sd.get("df") is not None and len(sd["df"]):
+                pts.append(f"{_bold(len(sd['df']))} deal(s) closed won {sd['range'][0].strftime('%d/%m')} to "
+                           f"{sd['range'][1].strftime('%d/%m/%Y')}, worth {_bold('£{:,.2f}'.format(sd['total']))} in lease value.")
+            story.append(_callout(st, W, pts))
+            story.append(Spacer(1, 4 * mm))
+
+            # two charts side by side
+            half = (W - 6 * mm) / 2
+            won_rows = [(k_, int(v)) for k_, v in S["won_by_rep"].items()][:8]
+            left = [Paragraph("DEALS WON PER CONSULTANT", st["lbl"]), Spacer(1, 1.5 * mm)]
+            left.append(_BarList(half, won_rows, color="good", label_w=30 * mm, fmt=lambda v: f"{int(v)}")
+                        if won_rows else Paragraph("No won deals in this timeframe.", st["note"]))
+            stage_rows = [(s["Stage / Status"], s["Total Count"], s["color"]) for s in S["stages"] if s["Total Count"] > 0]
+            right = [Paragraph("STAGE BREAKDOWN", st["lbl"]), Spacer(1, 1.5 * mm)]
+            right.append(_BarList(half, stage_rows, color="accent", label_w=34 * mm, fmt=lambda v: f"{int(v)}")
+                         if stage_rows else Paragraph("No deals in this timeframe.", st["note"]))
+            pair, _ = _pair(left, right, W)
+            story.append(pair)
+            story.append(Spacer(1, 4 * mm))
+
+            # consultant performance
+            rs = S["rep_summary"]
+            if rs is not None and len(rs):
+                story.append(Paragraph("CONSULTANT PERFORMANCE  -  whole timeframe", st["lbl"]))
+                story.append(Spacer(1, 1.5 * mm))
+                rows = [[{"t": r["Sales Rep"] or "Unassigned", "bold": True}, int(r["Total Deals"]), int(r["Won"]),
+                         int(r["In Progress"]), int(r["Booked"]), int(r["Lost"])] for _, r in rs.head(10).iterrows()]
+                story.append(_table(st, ["Consultant", "Total", "Won", "In progress", "Booked", "Lost"], rows,
+                                    [66 * mm, 22 * mm, 22 * mm, 26 * mm, 24 * mm, 22 * mm], right=(1, 2, 3, 4, 5)))
+                story.append(Spacer(1, 4 * mm))
+
+            # upcoming appointments
+            if up is not None and len(up):
+                story.append(CondPageBreak(45 * mm))
+                story.append(Paragraph("UPCOMING APPOINTMENTS  -  next 10 (follows consultant and stage filters)", st["lbl"]))
+                story.append(Spacer(1, 1.5 * mm))
+                rows = [[r["Parsed Date"].strftime("%a %d %b  %H:%M"), {"t": r["Client Name"], "bold": True},
+                         r["Sales Rep"] or "Unassigned", r["Status"]] for _, r in up.iterrows()]
+                story.append(_table(st, ["When", "Client", "Consultant", "Stage"], rows,
+                                    [36 * mm, 66 * mm, 40 * mm, 40 * mm]))
+                story.append(Spacer(1, 4 * mm))
+
+            # sold deals
+            if sd and sd.get("df") is not None and len(sd["df"]):
+                story.append(CondPageBreak(55 * mm))
+                scope = "SYComms-owned deals only" if sd["syc_only"] else "all Closed Won deals in Zoho"
+                story.append(Paragraph(f"SOLD DEALS  -  closed won {sd['range'][0].strftime('%d/%m/%Y')} to "
+                                       f"{sd['range'][1].strftime('%d/%m/%Y')} ({scope})", st["lbl"]))
+                story.append(Spacer(1, 1.5 * mm))
+                sdf = sd["df"]
+                rows = [[{"t": r["Client Name"], "bold": True}, r["Sales Rep"] or "Unassigned",
+                         _fmt_date(r["Closing Date"]), "£{:,.2f}".format(r["Monthly Network Spend"]),
+                         "£{:,.2f}".format(r["Total Lease Value"])] for _, r in sdf.head(8).iterrows()]
+                story.append(_table(st, ["Deal", "Consultant", "Closed", "Monthly network", "Lease value"], rows,
+                                    [58 * mm, 36 * mm, 24 * mm, 32 * mm, 32 * mm], right=(3, 4)))
+                story.append(Spacer(1, 1 * mm))
+                extra = f"Showing the latest {min(8, len(sdf))} of {len(sdf)}.  " if len(sdf) > 8 else ""
+                story.append(Paragraph(f"{extra}Total lease value sold this period: {_bold('£{:,.2f}'.format(sd['total']))}.", st["note"]))
+
+        def _page(canv, doc):
+            canv.saveState()
+            canv.setFillColor(_hx("bg"))
+            canv.rect(0, 0, A4[0], A4[1], fill=1, stroke=0)
+            canv.setFillColor(_hx("faint"))
+            canv.setFont("Helvetica", 6.6)
+            canv.drawString(14 * mm, 7 * mm, "SYComms  -  Renewals & Sales Command Center")
+            canv.drawRightString(A4[0] - 14 * mm, 7 * mm, f"Page {doc.page}")
+            canv.restoreState()
+
+        buf = io.BytesIO()
+        doc = BaseDocTemplate(buf, pagesize=A4, leftMargin=14 * mm, rightMargin=14 * mm, topMargin=12 * mm,
+                              bottomMargin=14 * mm, title="SYComms Renewals & Sales Briefing", author="SYComms")
+        doc.addPageTemplates([PageTemplate(id="p", frames=[Frame(14 * mm, 14 * mm, W, A4[1] - 26 * mm, id="f",
+                                                                  leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)],
+                                           onPage=_page)])
+        doc.build(story)
+        return buf.getvalue()
+
+
+# --- PDF briefing download (sidebar) ---
+if REPORTLAB_OK:
+    try:
+        pdf_bytes = build_pdf_report(
+            {
+                "generated": datetime.now(UK_TZ).strftime("%A %d %B %Y, %H:%M (UK time)"),
+                "df": df,
+                "today": today,
+                **report,
+            }
+        )
+        pdf_slot.download_button(
+            "Download PDF briefing",
+            data=pdf_bytes,
+            file_name=f"SYComms_Renewals_Sales_Briefing_{datetime.now(UK_TZ).strftime('%Y-%m-%d')}.pdf",
+            mime="application/pdf",
+            key="pdf_download",
+            help="A 2-3 page summary of both tabs, following the filters and date ranges currently selected.",
+            **FULL_WIDTH,
+        )
+    except Exception as pdf_err:  # never let the report take the dashboard down
+        pdf_slot.caption(f"PDF briefing unavailable: {pdf_err}")
+else:
+    pdf_slot.caption("PDF briefing needs the reportlab package - add `reportlab` to requirements.txt.")
 
 # Fill in the hero banner reserved at the top of the page now that the
 # live counts are known.
